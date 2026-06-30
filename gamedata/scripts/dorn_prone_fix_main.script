@@ -36,6 +36,7 @@ local CONFIG = {
 }
 
 local is_prone = nil
+local blend_move_anims = get_console():get_bool("blend_move_anims") or false
 
 local function log(log_type, msg)
 	if _G.dorn_dbg then
@@ -43,6 +44,15 @@ local function log(log_type, msg)
 		local colors = _G.dorn_dbg.COLORS
 		_G.dorn_dbg.write(MOD_ID, slot.order, "[ProneFix] " .. tostring(msg), colors and colors[slot.color])
 	end
+end
+
+local function on_option_change()
+	CONFIG.debug_log = _G.dorn_mcm.bool(MOD_ID, "development/debug_log", false)
+	CONFIG.cam_height_stand = _G.dorn_mcm.number(MOD_ID, "development/cam_height_stand", 1.65)
+	CONFIG.cam_height_crouch = _G.dorn_mcm.number(MOD_ID, "development/cam_height_crouch", 1.2)
+	CONFIG.cam_height_prone = _G.dorn_mcm.number(MOD_ID, "development/cam_height_prone", 0.45)
+	CONFIG.prone_damage_mult = _G.dorn_mcm.number(MOD_ID, "main/prone_damage_mult", 1.2)
+	_G.dorn_dbg.set_enabled(MOD_ID, CONFIG.debug_log)
 end
 
 local function get_nearest_posture_from_camera_height(actor)
@@ -74,7 +84,7 @@ local function get_nearest_posture_from_camera_height(actor)
 	end
 end
 
-local function get_posture_from_player_input(actor)
+local function get_posture_from_player_input()
 	-- get input posture from move states
 	local isSlow = IsMoveState("mcAccel")
 	local isCrouching = IsMoveState("mcCrouch")
@@ -127,36 +137,52 @@ local function play_motion(actor, motion, mix_in)
 end
 
 local function on_actor_on_update()
-	local actor = db.actor
+	local _, actor = _G.dorn_sys.ready(MOD_ID, db, on_option_change)
 	if not actor then
 		return
 	end
 
 	local camera_posture = get_nearest_posture_from_camera_height(actor)
-	local input_posture = get_posture_from_player_input(actor)
+	local input_posture = get_posture_from_player_input()
 
 	-- first update
 	if is_prone == nil then
 		is_prone = camera_posture == POSTURES.PRONE
 		if is_prone then
 			log(LOG_TYPE.STATE, "state: start prone")
+			if blend_move_anims then
+				get_console():execute("blend_move_anims off")
+			end
 		else
 			log(LOG_TYPE.STATE, "state: start not prone")
+			if blend_move_anims then
+				get_console():execute("blend_move_anims on")
+			end
 		end
 	end
 
+	-- enter prone
 	if camera_posture == POSTURES.PRONE then
+		-- spam prone motion
+		play_motion(actor, "dorn_prone", false)
+
 		if not is_prone then
 			log(LOG_TYPE.STATE, "state: enter prone")
-		end
+			is_prone = true
 
-		-- hide bones when camera is nearest the prone posture and spam prone motion
-		is_prone = true
-		set_prone_bones_visible(actor, false)
-		play_motion(actor, "dorn_prone", false)
+			-- hide bones when camera is nearest the prone posture
+			set_prone_bones_visible(actor, false)
+
+			-- disable 1st person player blend_move_anims
+			if blend_move_anims then
+				get_console():execute("blend_move_anims off")
+			end
+		end
+	-- leave prone
 	elseif is_prone then
-		-- show bones and trigger new idle motion on leaving prone (just once)
 		is_prone = false
+
+		-- show bones and trigger new idle motion on leaving prone
 		set_prone_bones_visible(actor, true)
 		if input_posture == POSTURES.STAND then
 			log(LOG_TYPE.STATE, "state: standing")
@@ -170,10 +196,18 @@ local function on_actor_on_update()
 			log(LOG_TYPE.STATE, "state: input prone but cam not prone!")
 			play_motion(actor, "cr_idle_0", false)
 		end
+
+		-- enable 1st person player blend_move_anims
+		if blend_move_anims then
+			get_console():execute("blend_move_anims on")
+		end
 	end
 end
 
 local function on_actor_on_before_hit(shit, bone_id, flags)
+	if not _G.dorn_sys.ready(MOD_ID, db) then
+		return
+	end
 	if not is_prone or not shit or not shit.power or shit.power <= 0 then
 		return
 	end
@@ -186,36 +220,10 @@ local function on_actor_on_before_hit(shit, bone_id, flags)
 	log(LOG_TYPE.DAMAGE, string.format("damage: x%.2f: %.2f -> %.2f", CONFIG.prone_damage_mult, before, shit.power))
 end
 
-local function on_option_change()
-	if _G.dorn_mcm then
-		CONFIG.debug_log = _G.dorn_mcm.bool(MOD_ID, "development/debug_log", false)
-		CONFIG.cam_height_stand = _G.dorn_mcm.number(MOD_ID, "development/cam_height_stand", 1.65)
-		CONFIG.cam_height_crouch = _G.dorn_mcm.number(MOD_ID, "development/cam_height_crouch", 1.2)
-		CONFIG.cam_height_prone = _G.dorn_mcm.number(MOD_ID, "development/cam_height_prone", 0.45)
-		CONFIG.prone_damage_mult = _G.dorn_mcm.number(MOD_ID, "main/prone_damage_mult", 1.2)
-	end
-	if _G.dorn_dbg then
-		_G.dorn_dbg.set_enabled(MOD_ID, CONFIG.debug_log)
-	end
-end
-
 function on_game_start()
 	is_prone = nil
-	on_option_change()
 	RegisterScriptCallback("actor_on_update", on_actor_on_update)
 	RegisterScriptCallback("actor_on_before_hit", on_actor_on_before_hit)
 	RegisterScriptCallback("on_option_change", on_option_change)
-
 	log(LOG_TYPE.LIFECYCLE, "loaded")
-end
-
-function on_game_end()
-	if db.actor then
-		set_prone_bones_visible(db.actor, true)
-	end
-	UnregisterScriptCallback("actor_on_update", on_actor_on_update)
-	UnregisterScriptCallback("actor_on_before_hit", on_actor_on_before_hit)
-	UnregisterScriptCallback("on_option_change", on_option_change)
-
-	log(LOG_TYPE.LIFECYCLE, "unloaded")
 end
